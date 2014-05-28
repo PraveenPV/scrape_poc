@@ -1,13 +1,14 @@
 require 'rubygems'
-require 'mechanize'
 require 'json'
 require 'yaml'
-#require 'pry'
+require 'pry'
 require 'csv'
 require 'set'
 require 'optparse'
+require 'typhoeus'
 
 require_relative 'parse_helper'
+require_relative 'typhoeus_helper'
 require_relative 'models'
 
 URL = 'http://www.perfectgame.org/Articles/View.aspx?article=9322'
@@ -15,13 +16,16 @@ PROFILE_URL_FORMAT = 'http://www.perfectgame.org/Players/Playerprofile.aspx?ID='
 SELECTOR_HEADER = '#ContentPlaceHolder1_prof_whitelink div.prof_right_of_main_image > div:nth-child(1) > div:nth-child(2)'
 SELECTOR_INFO_TABLE = '#ContentPlaceHolder1_prof_whitelink div.main_prof_bio_section > div > table'
 SELECTOR_COMMITMENT = '#ctl00_ContentPlaceHolder1_RadPanelBar1 li.rpFirst b'
-BROKEN_URL_CACHE = "_cache/%_broken_urls.txt"
+BROKEN_URL_CACHE = "#{CACHE_DIR}/%_broken_urls.txt"
+USER_AGENT = "Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/32.0.1667.0 Safari/537.36"
+BATCH_SIZE = 100
 
 $options = {
     :output => 'perfectgame.csv',
     :header => true,
     :start_id => 105895,
-    :end_id => 357201
+    :end_id => 357201,
+    :verbose => false
 }
 
 optparse = OptionParser.new do |opts|
@@ -42,6 +46,10 @@ optparse = OptionParser.new do |opts|
     opts.on("-e", "--end-id END_ID", "ending id") do |end_id|
         $options[:end_id] = end_id.to_i
     end
+
+    opts.on("-v", "--verbose", "verbose output") do
+        $options[:verbose] = true
+    end
 end
 
 optparse.parse!
@@ -61,6 +69,8 @@ def extract_state(str)
 end
 
 def parse_player_details(page)
+    puts "[PARSING] #{page.uri}" if $options[:verbose]
+
     player = Player.new
     header = page.at(SELECTOR_HEADER)
     return if !header
@@ -112,25 +122,30 @@ def parse_player_details(page)
         end
     end
 
-    player
+    return player
 end
 
-def crawl_player_page(agent, url)
-    page = cached_get(agent, url)
-    obj = parse_player_details(page)
-end
-
-
-def crawl_index_page(agent, url)
-    page = cached_get(agent, url)
-    links = page.links_with(:href => /Playerprofile.aspx?/)
-    results = []
-    # l = links.first
-    # results.push(crawl_player_page(agent, page.uri.merge(l.uri).to_s))
-    results = links.map do |l|
-        crawl_player_page(agent, page.uri.merge(l.uri).to_s)
+def crawl_player_page(hydra, url)
+    request = Typhoeus::Request.new(url,
+                                    :headers=>{"User-Agent" => USER_AGENT})
+    request.on_complete do |response|
+        #binding.pry
+        # typheous is not parsing the html response properly in certain cases
+        if response.success? || response.body.include?('HTTP/1.1 200 OK')
+            puts "[SUCCESS] #{url}"
+            html = response.body[response.body.index('<html')..-1]
+            page = ScrapedPage.new(html, url)
+            obj = parse_player_details(page)
+            yield obj, url
+        elsif response.timed_out?
+            puts "[TIMEOUT] #{url}"
+        elsif response.code == 0
+            puts "[#{response.return_message}] #{url}"
+        else
+            puts "[ERROR - #{response.code}] #{ur}"
+        end
     end
-    dump_to_csv(results)
+    hydra.queue request
 end
 
 def load_broken_urls()
@@ -154,36 +169,37 @@ def fetch_last_id()
     end
 end
 
-def crawl_profiles(agent)
+def crawl_profiles()
     from = $options[:start_id]
     to = $options[:end_id]
-    results = []
     header = $options[:header]
     broken_urls = load_broken_urls()
     error_cache = File.open($broken_url_file, 'a')
-    last_id = fetch_last_id()
-    from = last_id if last_id
+    #last_id = fetch_last_id()
+    #from = last_id if last_id
+    hydra = Typhoeus::Hydra.new(max_concurrency: 10)
     for id in from..to
         url = "#{PROFILE_URL_FORMAT}#{id}"
-        begin
-            next if broken_urls.include? url
-            r = crawl_player_page(agent, url)
-            results.push(r) if r
-            if results.length > 10
-                dump_to_csv(results, header)
-                header = false
-                results = []
+        next if broken_urls.include? url
+        crawl_player_page(hydra, url) do |r,url|
+            if r
+                $results.push(r)
+            else
+                puts "[FAILED] #{url}"
+                error_cache.puts url
+                error_cache.flush
             end
-        rescue Mechanize::ResponseCodeError
-            puts "^^^ FAILED"
-            error_cache.puts url
-            error_cache.flush
+            if  $results.length > 10
+                dump_to_csv($results, header)
+                header = false
+                $results = []
+            end
+        end
+        if (id - from + 1) % BATCH_SIZE == 0
+            puts "Queued batch... Running Hydra"
+            hydra.run
         end
     end
-    if results.length > 0
-        dump_to_csv(results, header)
-    end
-    puts "Result in #{$options[:output]}"
 end
 
 def dump_to_csv(results, header=false)
@@ -198,7 +214,18 @@ def dump_to_csv(results, header=false)
 end
 
 $broken_url_file = BROKEN_URL_CACHE.sub('%', $options[:output].downcase.sub('.csv',''))
-agent = setup_agent
+#agent = setup_agent
 #crawl_index_page(agent, URL)
-crawl_profiles(agent)
+Typhoeus::Config.cache = Cache.new
+#Typhoeus::Config.verbose = $options[:verbose]
+
+$results = []
+crawl_profiles()
+
+# all done.. write out any pending results
+if $results.length > 0
+    dump_to_csv($results)
+end
+puts "Result in #{$options[:output]}"
+
 

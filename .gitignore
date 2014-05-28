@@ -1,4 +1,4 @@
-_cache/
+_*/
 *.csv
 *.zip
 *.gem

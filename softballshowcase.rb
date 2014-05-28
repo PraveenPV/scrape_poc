@@ -106,7 +106,7 @@ def dump_to_csv(results, append=false)
         headers = results.first.headers()
         csv << headers if !append
         results.each do |o|
-          csv << o.to_a(headers)
+          csv << o.to_a()
         end
     end
 end
