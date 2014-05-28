@@ -148,46 +148,18 @@ def crawl_player_page(hydra, url)
     hydra.queue request
 end
 
-def load_broken_urls()
-    broken_urls = Set.new
-    if File.exists? $broken_url_file
-        File.open($broken_url_file).each do |line|
-            broken_urls << line.strip
-        end
-    end
-    return broken_urls
-end
-
-def fetch_last_id()
-    if File.exists?($options[:output])
-        File.open($options[:output]) do |f|
-            lines = f.tail(1)
-            if lines.length > 0 && lines[0].include?(',')
-                lines[0].split(',')[0].to_i
-            end
-        end
-    end
-end
-
 def crawl_profiles()
     from = $options[:start_id]
     to = $options[:end_id]
     header = $options[:header]
-    broken_urls = load_broken_urls()
-    error_cache = File.open($broken_url_file, 'a')
-    #last_id = fetch_last_id()
-    #from = last_id if last_id
     hydra = Typhoeus::Hydra.new(max_concurrency: 10)
     for id in from..to
         url = "#{PROFILE_URL_FORMAT}#{id}"
-        next if broken_urls.include? url
         crawl_player_page(hydra, url) do |r,url|
             if r
                 $results.push(r)
             else
                 puts "[FAILED] #{url}"
-                error_cache.puts url
-                error_cache.flush
             end
             if  $results.length > 10
                 dump_to_csv($results, header)
@@ -213,12 +185,8 @@ def dump_to_csv(results, header=false)
     end
 end
 
-$broken_url_file = BROKEN_URL_CACHE.sub('%', $options[:output].downcase.sub('.csv',''))
-#agent = setup_agent
-#crawl_index_page(agent, URL)
 Typhoeus::Config.cache = Cache.new
 #Typhoeus::Config.verbose = $options[:verbose]
-
 $results = []
 crawl_profiles()
 
